@@ -1,4 +1,4 @@
-//
+///
 #include "xil_printf.h"
 #include "stdint.h"
 
@@ -10,18 +10,22 @@
 #define JXADC_CH6     (*(volatile uint16_t *)0x44a20258)   // ADC channel 6
 #define JXADC_CH14    (*(volatile uint16_t *)0x44a20278)   // ADC channel 14
 
-// assign fixed anodes for each counter
+// assign fixed anodes for each counter (0 = rightmost, 3 = leftmost)
 #define ANODE_LEFT    3   // leftmost digit
 #define ANODE_MID     2   // next digit
 #define ANODE_RIGHT   1   // next digit
-// (ANODE 0 remains unused in this version)
+// (ANODE 0 remains unused)
 
+// 0–F hex patterns, active-low segments
 static const uint8_t sevenSegLUT[16] = {
     0x40, 0x79, 0x24, 0x30,
     0x19, 0x12, 0x02, 0x78,
     0x00, 0x10, 0x77, 0x7C,
     0x39, 0x5E, 0x79, 0x71
 };
+
+// blank = all segments off (active-low)
+#define SEG_BLANK  0x7F  
 
 void delay_ms(unsigned ms) {
     while (ms--) {
@@ -31,6 +35,7 @@ void delay_ms(unsigned ms) {
     }
 }
 
+// simple debounced “up” button press
 _Bool up_button_press() {
     static uint8_t prev = 0;
     uint8_t curr = BTN & 0x1;
@@ -39,6 +44,7 @@ _Bool up_button_press() {
     return pressed;
 }
 
+// measure duty-cycle in percent (0–100)
 int measure_duty_cycle(volatile uint16_t *adc) {
     const int samples = 1000;
     int high = 0;
@@ -49,6 +55,7 @@ int measure_duty_cycle(volatile uint16_t *adc) {
     return (high * 100) / samples;
 }
 
+// drive the 16 LEDs as a “strength meter”
 void strength_meter(int c0, int c1) {
     if      (c0 <= 1 || c1 <= 13) LEDS = 0xFFFF;
     else if (c0 <= 2 || c1 <= 14) LEDS = 0x3FFF;
@@ -60,9 +67,9 @@ void strength_meter(int c0, int c1) {
     else                          LEDS = 0x0000;
 }
 
-// display a hex value (0–15) on a specific anode (0–3)
+// display a hex digit (0–F) on a specific anode (0–3)
 void display_on_anode(uint8_t anode, uint8_t value) {
-    uint8_t pat = sevenSegLUT[value & 0x0F];
+    uint8_t pat = (value < 16) ? sevenSegLUT[value] : SEG_BLANK;
     ANODES = 0xF;                        // disable all digits
     SEG    = pat;                       // set segment bits
     ANODES = (~(1 << anode)) & 0xF;     // enable only this digit
@@ -70,30 +77,38 @@ void display_on_anode(uint8_t anode, uint8_t value) {
 }
 
 int main() {
-    uint8_t left_ctr  = 0,
-            mid_ctr   = 0,
-            right_ctr = 0;
+    uint8_t left_ctr  = 0;   // leftmost
+    uint8_t mid_ctr   = 0;   // center-left
+    uint8_t right_ctr = 0;   // center-right
+                             // rightmost stays blank
 
     print("Start here!\n");
 
     while (1) {
-        // 1) measure and update LEDs
+        // 1) measure and update LED strength meter
         int c0 = measure_duty_cycle(&JXADC_CH6);
         int c1 = measure_duty_cycle(&JXADC_CH14);
         strength_meter(c0, c1);
 
-        // 2) button-driven increment of exactly one counter
+        // 2) on button-up, increment exactly one counter (stop at 0xF)
         if (up_button_press()) {
-            if      (c0 <= 3)                              { left_ctr++;  }
-            else if (c0 > 3 && c0 < 7 && c1 > 14 && c1 < 19) { mid_ctr++;   }
-            else if (c1 <= 15)                             { right_ctr++; }
+            if      (c0 <= 3) {
+                if (left_ctr  < 0xF) left_ctr++;
+            }
+            else if (c0 > 3 && c0 < 7 && c1 > 14 && c1 < 19) {
+                if (mid_ctr   < 0xF) mid_ctr++;
+            }
+            else if (c1 <= 15) {
+                if (right_ctr < 0xF) right_ctr++;
+            }
         }
 
-        // 3) multiplex each counter on its own dedicated anode
+        // 3) rapidly multiplex the three counters; rightmost digit stays blank
         for (int i = 0; i < 50; i++) {
             display_on_anode(ANODE_LEFT,  left_ctr);
             display_on_anode(ANODE_MID,   mid_ctr);
             display_on_anode(ANODE_RIGHT, right_ctr);
+            // no call for anode 0 ⇒ rightmost position remains off
         }
     }
 
